@@ -47,6 +47,7 @@ const LOG_KEEP_BYTES: u64 = 6 * 1024 * 1024;
 const LOCAL_PROXY_HOST: &str = "127.0.0.1";
 const LOCAL_PROXY_PORT: u16 = 2080;
 const LOCAL_PROXY_TAG: &str = "local-proxy";
+const RU_IPV4_DOMAIN_SUFFIXES: [&str; 4] = [".ru", ".su", ".xn--p1ai", ".yandex.net"];
 const AUTOSTART_ARG: &str = "--autostart";
 const TRAY_OPEN_ID: &str = "tray-open";
 const TRAY_EXIT_ID: &str = "tray-exit";
@@ -134,11 +135,22 @@ struct ProfileState {
     active_tag: Option<String>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct AppState {
     last_mode: ProxyMode,
     app_rules: Vec<AppRule>,
+    force_ipv4_ru: bool,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            last_mode: ProxyMode::default(),
+            app_rules: Vec::new(),
+            force_ipv4_ru: true,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -518,7 +530,12 @@ fn push_ru_bypass_rules(rules: &mut Vec<Value>) {
     }));
 }
 
-fn build_config(app: &AppHandle, mode: ProxyMode, rules: Vec<AppRule>) -> Result<PathBuf, String> {
+fn build_config(
+    app: &AppHandle,
+    mode: ProxyMode,
+    rules: Vec<AppRule>,
+    force_ipv4_ru: bool,
+) -> Result<PathBuf, String> {
     let (mut profile, _profile_path) = ensure_profile(app)?;
     let log_path = resolve_log_path(app)?;
 
@@ -652,25 +669,38 @@ fn build_config(app: &AppHandle, mode: ProxyMode, rules: Vec<AppRule>) -> Result
     }
 
     if !profile_obj.contains_key("dns") {
-        profile_obj.insert(
-            "dns".to_string(),
-            json!({
-                "servers": [
-                    {
-                        "tag": "dns-local",
-                        "type": "local"
-                    },
-                    {
-                        "tag": "dns-remote",
-                        "type": "https",
-                        "server": "dns.google",
-                        "path": "/dns-query",
-                        "domain_resolver": "dns-local"
-                    }
-                ],
-                "final": "dns-remote"
-            }),
-        );
+        let mut dns = json!({
+            "servers": [
+                {
+                    "tag": "dns-local",
+                    "type": "local"
+                },
+                {
+                    "tag": "dns-remote",
+                    "type": "https",
+                    "server": "dns.google",
+                    "path": "/dns-query",
+                    "domain_resolver": "dns-local"
+                }
+            ],
+            "final": "dns-remote"
+        });
+        if force_ipv4_ru {
+            if let Some(dns_obj) = dns.as_object_mut() {
+                dns_obj.insert("strategy".to_string(), json!("prefer_ipv4"));
+                dns_obj.insert("reverse_mapping".to_string(), json!(true));
+                dns_obj.insert(
+                    "rules".to_string(),
+                    json!([{
+                        "domain_suffix": RU_IPV4_DOMAIN_SUFFIXES,
+                        "action": "route",
+                        "server": "dns-remote",
+                        "strategy": "ipv4_only"
+                    }]),
+                );
+            }
+        }
+        profile_obj.insert("dns".to_string(), dns);
     }
 
     let mut inbounds = vec![json!({
@@ -698,6 +728,9 @@ fn build_config(app: &AppHandle, mode: ProxyMode, rules: Vec<AppRule>) -> Result
                 "action": "hijack-dns",
                 "port": 53
             }));
+            rules.push(json!({
+                "action": "sniff"
+            }));
             push_ru_bypass_rules(&mut rules);
             rules.push(json!({
                 "inbound": [LOCAL_PROXY_TAG],
@@ -716,6 +749,9 @@ fn build_config(app: &AppHandle, mode: ProxyMode, rules: Vec<AppRule>) -> Result
             rules.push(json!({
                 "action": "hijack-dns",
                 "port": 53
+            }));
+            rules.push(json!({
+                "action": "sniff"
             }));
             push_ru_bypass_rules(&mut rules);
             rules.push(json!({
@@ -1860,12 +1896,14 @@ fn apply_mode(
     state: &SharedState,
     mode: ProxyMode,
     app_rules: Vec<AppRule>,
+    force_ipv4_ru: bool,
 ) -> Result<ProxyStatus, String> {
     let _ = save_app_state(
         app,
         &AppState {
             last_mode: mode,
             app_rules: app_rules.clone(),
+            force_ipv4_ru,
         },
     );
 
@@ -1884,7 +1922,7 @@ fn apply_mode(
         return Ok(current_status(app, &mut guard));
     }
 
-    let config_path = match build_config(app, mode, app_rules) {
+    let config_path = match build_config(app, mode, app_rules, force_ipv4_ru) {
         Ok(path) => path,
         Err(err) => {
             guard.last_error = Some(err.clone());
@@ -1961,8 +1999,9 @@ fn set_mode(
     state: State<SharedState>,
     mode: ProxyMode,
     app_rules: Vec<AppRule>,
+    force_ipv4_ru: bool,
 ) -> Result<ProxyStatus, String> {
-    apply_mode(&app, state.inner(), mode, app_rules)
+    apply_mode(&app, state.inner(), mode, app_rules, force_ipv4_ru)
 }
 
 #[tauri::command]
@@ -2081,6 +2120,7 @@ pub fn run() {
             let saved_state = load_app_state(&app_handle);
             let saved_mode = saved_state.last_mode;
             let saved_rules = saved_state.app_rules;
+            let saved_force_ipv4_ru = saved_state.force_ipv4_ru;
 
             let tray_menu = Menu::new(app)?;
             let open_item = MenuItemBuilder::with_id(TRAY_OPEN_ID, "Открыть").build(app)?;
@@ -2123,7 +2163,13 @@ pub fn run() {
             }
 
             let state = app.state::<SharedState>();
-            let _ = apply_mode(&app_handle, state.inner(), saved_mode, saved_rules);
+            let _ = apply_mode(
+                &app_handle,
+                state.inner(),
+                saved_mode,
+                saved_rules,
+                saved_force_ipv4_ru,
+            );
 
             Ok(())
         })

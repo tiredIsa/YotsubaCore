@@ -35,6 +35,10 @@ const onThemeChange = (value: boolean) => {
 const onAutostartChange = (value: boolean) => {
   store.setAutostart(value);
 };
+
+const onForceIpv4RuChange = (value: boolean) => {
+  store.setForceIpv4Ru(value);
+};
 </script>
 
 <template>
@@ -90,6 +94,17 @@ const onAutostartChange = (value: boolean) => {
             :model-value="store.autostartEnabled"
             :disabled="store.autostartBusy"
             @update:model-value="onAutostartChange"
+          />
+        </div>
+        <div class="flex items-center gap-3 rounded-[calc(var(--radius)-2px)] border border-border bg-card/60 px-3 py-2">
+          <div>
+            <p class="text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground">IPv4 RU</p>
+            <p class="text-xs font-medium text-foreground">Принудительно для .ru/.su/.рф</p>
+          </div>
+          <Switch
+            aria-label="Toggle RU IPv4"
+            :model-value="store.forceIpv4Ru"
+            @update:model-value="onForceIpv4RuChange"
           />
         </div>
         <span v-if="store.busy" class="text-xs text-muted-foreground"> Saving… </span>

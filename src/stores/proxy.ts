@@ -56,6 +56,7 @@ export interface ImportResult {
 interface SavedState {
   lastMode: ProxyMode;
   appRules: AppRule[];
+  forceIpv4Ru: boolean;
 }
 
 export interface ProfileItem {
@@ -151,6 +152,8 @@ export const useProxyStore = defineStore("proxy", {
     ready: false,
     lastAppliedMode: "off" as ProxyMode,
     lastAppliedRulesSignature: "",
+    forceIpv4Ru: true,
+    lastAppliedForceIpv4Ru: true,
   }),
   getters: {
     appList(state): AppListItem[] {
@@ -253,6 +256,7 @@ export const useProxyStore = defineStore("proxy", {
       try {
         const saved = await invoke<SavedState>("get_saved_state");
         this.appRules = saved.appRules ?? [];
+        this.forceIpv4Ru = saved.forceIpv4Ru ?? true;
         if (!this.busy) {
           this.mode = saved.lastMode ?? "off";
         }
@@ -325,6 +329,7 @@ export const useProxyStore = defineStore("proxy", {
     snapshotAppliedState() {
       this.lastAppliedMode = this.mode;
       this.lastAppliedRulesSignature = rulesSignature(this.appRules);
+      this.lastAppliedForceIpv4Ru = this.forceIpv4Ru;
     },
     scheduleApply(delayMs = 350) {
       if (!this.ready) return;
@@ -336,7 +341,8 @@ export const useProxyStore = defineStore("proxy", {
         const signature = rulesSignature(this.appRules);
         const modeChanged = this.mode !== this.lastAppliedMode;
         const rulesChanged = signature !== this.lastAppliedRulesSignature;
-        if (!modeChanged && !rulesChanged) return;
+        const ipv4Changed = this.forceIpv4Ru !== this.lastAppliedForceIpv4Ru;
+        if (!modeChanged && !rulesChanged && !ipv4Changed) return;
         if (this.busy) {
           this.scheduleApply(500);
           return;
@@ -388,7 +394,8 @@ export const useProxyStore = defineStore("proxy", {
       if (this.busy) return;
       if (
         this.mode === this.lastAppliedMode &&
-        signature === this.lastAppliedRulesSignature
+        signature === this.lastAppliedRulesSignature &&
+        this.forceIpv4Ru === this.lastAppliedForceIpv4Ru
       ) {
         return;
       }
@@ -398,10 +405,12 @@ export const useProxyStore = defineStore("proxy", {
         const status = await invoke<ProxyStatus>("set_mode", {
           mode: this.mode,
           appRules: this.appRules,
+          forceIpv4Ru: this.forceIpv4Ru,
         });
         this.status = status;
         this.lastAppliedMode = this.mode;
         this.lastAppliedRulesSignature = signature;
+        this.lastAppliedForceIpv4Ru = this.forceIpv4Ru;
       } catch (err) {
         const message = String(err ?? "");
         if (message.startsWith("PROFILE_MISSING|")) {
@@ -498,6 +507,11 @@ export const useProxyStore = defineStore("proxy", {
       } finally {
         this.profileBusy = false;
       }
+    },
+    setForceIpv4Ru(value: boolean) {
+      if (this.forceIpv4Ru === value) return;
+      this.forceIpv4Ru = value;
+      this.scheduleApply();
     },
   },
 });
