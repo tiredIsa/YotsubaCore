@@ -1,0 +1,129 @@
+name: Release Portable
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-portable:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read app metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $config = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
+          $version = $config.version
+          $productName = $config.productName
+          $match = Select-String -Path src-tauri/Cargo.toml -Pattern '^\s*name\s*=\s*"(.*)"' | Select-Object -First 1
+          if (-not $match) {
+            Write-Error "Failed to read package name from Cargo.toml"
+            exit 1
+          }
+          $cargoName = $match.Matches[0].Groups[1].Value
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "productName=$productName" >> $env:GITHUB_OUTPUT
+          "cargoName=$cargoName" >> $env:GITHUB_OUTPUT
+
+      - name: Check release tag
+        id: tag
+        shell: pwsh
+        run: |
+          git fetch --tags --force
+          $tag = "v${{ steps.meta.outputs.version }}"
+          $exists = git tag -l $tag
+          if ($exists) {
+            "skip=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "skip=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Set up Rust
+        if: steps.tag.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Bun
+        if: steps.tag.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "latest"
+
+      - name: Ensure sing-box.exe
+        if: steps.tag.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          SING_BOX_URL: ${{ secrets.SING_BOX_URL }}
+        run: |
+          $path = "src-tauri/resources/sing-box.exe"
+          if (Test-Path $path) {
+            exit 0
+          }
+          if (-not $env:SING_BOX_URL) {
+            Write-Error "src-tauri/resources/sing-box.exe is missing. Provide it in the repo or set the SING_BOX_URL secret."
+            exit 1
+          }
+          Invoke-WebRequest -Uri $env:SING_BOX_URL -OutFile $path
+
+      - name: Install dependencies
+        if: steps.tag.outputs.skip != 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Build app
+        if: steps.tag.outputs.skip != 'true'
+        run: bun run tauri build
+
+      - name: Package portable zip
+        if: steps.tag.outputs.skip != 'true'
+        id: package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          $productName = "${{ steps.meta.outputs.productName }}"
+          $cargoName = "${{ steps.meta.outputs.cargoName }}"
+          $exeCandidates = @(
+            "src-tauri/target/release/$productName.exe",
+            "src-tauri/target/release/$cargoName.exe"
+          )
+          $exePath = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exePath) {
+            $exePath = Get-ChildItem "src-tauri/target/release" -Filter "*.exe" |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if ($exePath) {
+              $exePath = $exePath.FullName
+            }
+          }
+          if (-not $exePath) {
+            Write-Error "Release executable not found."
+            exit 1
+          }
+          $stageRoot = "dist-portable/$productName"
+          New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+          Copy-Item $exePath -Destination "$stageRoot/$productName.exe" -Force
+          Copy-Item "src-tauri/resources" -Destination "$stageRoot/resources" -Recurse -Force
+          $zipName = "$productName-portable-win64-v$version.zip"
+          if (Test-Path $zipName) {
+            Remove-Item $zipName -Force
+          }
+          Compress-Archive -Path $stageRoot -DestinationPath $zipName
+          "zip=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        if: steps.tag.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.meta.outputs.version }}
+          name: v${{ steps.meta.outputs.version }}
+          body: |
+            Portable Windows build.
+            Requires Microsoft WebView2 Runtime.
+          files: ${{ steps.package.outputs.zip }}
